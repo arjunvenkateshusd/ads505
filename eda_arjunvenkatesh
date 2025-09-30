@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+EDA for Datafiniti pizza dataset (or similar CSVs).
+- Reads 1–2 CSV files
+- Cleans key fields
+- Saves summary tables and charts
+- Uses matplotlib only
+- Writes into a fresh timestamped subfolder each run
+"""
+
+import argparse
+import os
+import re
+import textwrap
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ---------------- Helpers ----------------
+
+def ensure_dir(p: str) -> str:
+    os.makedirs(p, exist_ok=True)
+    return p
+
+def make_run_dir(base: str, use_subdir: bool = True) -> str:
+    ensure_dir(base)
+    if use_subdir:
+        d = datetime.now().strftime("run_%Y-%m-%d_%H%M%S")
+        return ensure_dir(os.path.join(base, d))
+    return base
+
+def savefig(path: str):
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+def safe_slug(s: str) -> str:
+    s = re.sub(r'[^A-Za-z0-9._-]+', '_', str(s))
+    return s.strip('_')
+
+def coerce_numeric(df: pd.DataFrame, cols):
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+def parse_dates(df: pd.DataFrame, cols):
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    return df
+
+def top_counts(s: pd.Series, n=20):
+    return (
+        s.dropna()
+         .astype(str).str.strip()
+         .replace("", np.nan).dropna()
+         .value_counts()
+         .head(n)
+    )
+
+# ---------------- Plots ----------------
+
+def plot_missing(df: pd.DataFrame, outdir: str, tag: str):
+    miss = df.isna().sum().sort_values(ascending=False)
+    plt.figure(figsize=(10, max(4, 0.25*len(miss))))
+    miss.plot(kind="bar")
+    plt.title(f"Missing Values ({tag})")
+    plt.ylabel("Count")
+    plt.xlabel("Column")
+    savefig(os.path.join(outdir, safe_slug(f"{tag}_missing_values.png")))
+
+def plot_corr(df: pd.DataFrame, outdir: str, tag: str):
+    num = df.select_dtypes(include=[np.number])
+    if num.shape[1] == 0:
+        return
+    corr = num.corr(numeric_only=True)
+    plt.figure(figsize=(8, 6))
+    plt.imshow(corr, interpolation="nearest")
+    plt.title(f"Correlation ({tag})")
+    plt.xticks(range(corr.shape[1]), corr.columns, rotation=90)
+    plt.yticks(range(corr.shape[0]), corr.index)
+    plt.colorbar()
+    savefig(os.path.join(outdir, safe_slug(f"{tag}_correlation.png")))
+
+def plot_hists(df: pd.DataFrame, outdir: str, tag: str, bins=30):
+    num = df.select_dtypes(include=[np.number])
+    for col in num.columns:
+        plt.figure(figsize=(6,4))
+        df[col].dropna().plot(kind="hist", bins=bins)
+        plt.title(f"Histogram: {col}")
+        plt.xlabel(col)
+        plt.ylabel("Frequency")
+        savefig(os.path.join(outdir, safe_slug(f"{tag}_hist_{col}.png")))
+
+def plot_boxes(df: pd.DataFrame, outdir: str, tag: str):
+    num = df.select_dtypes(include=[np.number])
+    if num.shape[1] == 0:
+        return
+    for col in num.columns:
+        plt.figure(figsize=(6,4))
+        plt.boxplot(df[col].dropna().values, vert=True, labels=[col])
+        plt.title(f"Box: {col}")
+        savefig(os.path.join(outdir, safe_slug(f"{tag}_box_{col}.png")))
+
+def plot_top_cat(s: pd.Series, outdir: str, tag: str, title: str, n=25):
+    vc = top_counts(s, n=n)
+    if vc.empty:
+        return
+    plt.figure(figsize=(10, max(4, 0.35*len(vc))))
+    vc.iloc[::-1].plot(kind="barh")
+    plt.title(title)
+    plt.xlabel("Count")
+    plt.ylabel("Category")
+    savefig(os.path.join(outdir, safe_slug(f"{tag}_top_{title.lower()}.png")))
+
+def plot_price_dist(df: pd.DataFrame, outdir: str, tag: str):
+    cols = [c for c in ["menus.amountMin", "menus.amountMax", "priceRangeMin", "priceRangeMax"] if c in df.columns]
+    for c in cols:
+        s = pd.to_numeric(df[c], errors="coerce").dropna()
+        if s.empty:
+            continue
+        plt.figure(figsize=(6,4))
+        s.plot(kind="hist", bins=30)
+        plt.title(f"Distribution: {c}")
+        plt.xlabel(c)
+        plt.ylabel("Frequency")
+        savefig(os.path.join(outdir, safe_slug(f"{tag}_dist_{c}.png")))
+
+def plot_price_by_province(df: pd.DataFrame, outdir: str, tag: str):
+    base = [c for c in ["menus.amountMin", "priceRangeMin"] if c in df.columns]
+    if not base or "province" not in df.columns:
+        return
+    c = base[0]
+    tmp = df.copy()
+    tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
+    gp = tmp.groupby("province")[c].median().dropna().sort_values(ascending=False).head(25)
+    if gp.empty:
+        return
+    plt.figure(figsize=(10, max(4, 0.35*len(gp))))
+    gp.iloc[::-1].plot(kind="barh")
+    plt.title(f"Median {c} by Province (Top 25)")
+    plt.xlabel(f"Median {c}")
+    plt.ylabel("Province")
+    savefig(os.path.join(outdir, safe_slug(f"{tag}_median_{c}_by_province.png")))
+
+def plot_geo(df: pd.DataFrame, outdir: str, tag: str, sample=5000):
+    need = {"latitude", "longitude"}
+    if not need.issubset(df.columns):
+        return
+    pts = df[["latitude", "longitude"]].dropna()
+    if len(pts) == 0:
+        return
+    if len(pts) > sample:
+        pts = pts.sample(sample, random_state=42)
+    plt.figure(figsize=(6,6))
+    plt.scatter(pts["longitude"], pts["latitude"], s=5, alpha=0.5)
+    plt.title("Geo Scatter")
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+    savefig(os.path.join(outdir, safe_slug(f"{tag}_geo_scatter.png")))
+
+def plot_item_prices(df: pd.DataFrame, outdir: str, tag: str):
+    if "menus.name" not in df.columns:
+        return
+    d = df.copy()
+    for c in ["menus.amountMin", "menus.amountMax"]:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+    top_items = d["menus.name"].dropna().astype(str).value_counts().head(10).index.tolist()
+    for item in top_items:
+        sub = d[d["menus.name"].astype(str) == item]
+        vals = []
+        if "menus.amountMin" in sub.columns:
+            vals.append(pd.to_numeric(sub["menus.amountMin"], errors="coerce"))
+        if "menus.amountMax" in sub.columns:
+            vals.append(pd.to_numeric(sub["menus.amountMax"], errors="coerce"))
+        if not vals:
+            continue
+        s = pd.concat(vals).dropna()
+        if s.empty:
+            continue
+        plt.figure(figsize=(6,4))
+        s.plot(kind="hist", bins=25)
+        plt.title(f"Price Distribution: {item}")
+        plt.xlabel("Price")
+        plt.ylabel("Frequency")
+        savefig(os.path.join(outdir, safe_slug(f"{tag}_item_price_{item[:60]}.png")))
+
+# ---------------- Pipeline ----------------
+
+def run_eda(primary_csv: str, base_outdir: str, secondary_csv: str | None, subdir: bool):
+    run_out = make_run_dir(base_outdir, use_subdir=subdir)
+
+    print(f"[INFO] Reading: {primary_csv}")
+    df = pd.read_csv(primary_csv, low_memory=False)
+
+    if secondary_csv and os.path.exists(secondary_csv):
+        print(f"[INFO] Reading (secondary): {secondary_csv}")
+        df2 = pd.read_csv(secondary_csv, low_memory=False)
+    else:
+        df2 = None
+
+    date_cols = [c for c in ["menus.dateSeen", "dateAdded", "dateUpdated"] if c in df.columns]
+    num_cols  = [c for c in ["menus.amountMin", "menus.amountMax", "priceRangeMin", "priceRangeMax", "latitude", "longitude"] if c in df.columns]
+    df = parse_dates(df, date_cols)
+    df = coerce_numeric(df, num_cols)
+
+    if df2 is not None:
+        d2_date = [c for c in ["menus.dateSeen", "dateAdded", "dateUpdated"] if c in df2.columns]
+        d2_num  = [c for c in ["menus.amountMin", "menus.amountMax", "priceRangeMin", "priceRangeMax", "latitude", "longitude"] if c in df2.columns]
+        df2 = parse_dates(df2, d2_date)
+        df2 = coerce_numeric(df2, d2_num)
+
+    df.head(20).to_csv(os.path.join(run_out, "primary_head.csv"), index=False)
+    df.describe(include="all").to_csv(os.path.join(run_out, "primary_describe.csv"))
+    if df2 is not None:
+        df2.head(20).to_csv(os.path.join(run_out, "secondary_head.csv"), index=False)
+        df2.describe(include="all").to_csv(os.path.join(run_out, "secondary_describe.csv"))
+
+    plot_missing(df, run_out, "primary")
+    if df2 is not None:
+        plot_missing(df2, run_out, "secondary")
+
+    plot_corr(df, run_out, "primary")
+    if df2 is not None:
+        plot_corr(df2, run_out, "secondary")
+
+    plot_hists(df, run_out, "primary")
+    plot_boxes(df, run_out, "primary")
+    if df2 is not None:
+        plot_hists(df2, run_out, "secondary")
+        plot_boxes(df2, run_out, "secondary")
+
+    plot_price_dist(df, run_out, "primary")
+    if df2 is not None:
+        plot_price_dist(df2, run_out, "secondary")
+
+    plot_price_by_province(df, run_out, "primary")
+    if df2 is not None:
+        plot_price_by_province(df2, run_out, "secondary")
+
+    for col, title in [
+        ("city", "Top Cities"),
+        ("province", "Top Provinces/States"),
+        ("menus.name", "Top Menu Items"),
+        ("name", "Top Restaurant Names"),
+        ("categories", "Top Raw Categories"),
+    ]:
+        if col in df.columns:
+            plot_top_cat(df[col], run_out, "primary", title, n=25)
+        if df2 is not None and col in df2.columns:
+            plot_top_cat(df2[col], run_out, "secondary", title, n=25)
+
+    plot_geo(df, run_out, "primary")
+    if df2 is not None:
+        plot_geo(df2, run_out, "secondary")
+
+    plot_item_prices(df, run_out, "primary")
+    if df2 is not None:
+        plot_item_prices(df2, run_out, "secondary")
+
+    with open(os.path.join(run_out, "EDA_REPORT.md"), "w", encoding="utf-8") as f:
+        f.write("# EDA Report\n\n")
+        f.write(f"- Primary: `{os.path.abspath(primary_csv)}`\n")
+        if df2 is not None:
+            f.write(f"- Secondary: `{os.path.abspath(secondary_csv)}`\n")
+        f.write(f"- Rows (primary): {len(df)}\n")
+        f.write(f"- Cols  (primary): {len(df.columns)}\n")
+        f.write("\n## Notable Columns\n")
+        for c in ["menus.amountMin", "menus.amountMax", "priceRangeMin", "priceRangeMax", "menus.name", "city", "province", "latitude", "longitude"]:
+            if c in df.columns:
+                f.write(f"- {c}\n")
+        f.write("\n## Price Summary (primary)\n")
+        for c in ["menus.amountMin", "menus.amountMax", "priceRangeMin", "priceRangeMax"]:
+            if c in df.columns:
+                s = pd.to_numeric(df[c], errors="coerce").dropna()
+                if not s.empty:
+                    f.write(f"{c}: n={s.count()}, mean={s.mean():.2f}, med={s.median():.2f}, std={s.std():.2f}, min={s.min():.2f}, max={s.max():.2f}\n")
+        if "city" in df.columns:
+            f.write("\n## Top Cities (primary)\n")
+            f.write(df["city"].astype(str).value_counts().head(20).to_string())
+            f.write("\n")
+        if "province" in df.columns:
+            f.write("\n## Top Provinces/States (primary)\n")
+            f.write(df["province"].astype(str).value_counts().head(20).to_string())
+            f.write("\n")
+        f.write("\nCharts are saved in this run folder.\n")
+
+    print(f"[INFO] Done. Outputs: {run_out}")
+
+def main():
+    default_input = os.environ.get(
+        "PRIMARY_CSV",
+        "/Users/user/Desktop/USD/ADS 505/Datafiniti_Pizza_Restaurants_and_the_Pizza_They_Sell_May19.csv"
+    )
+    default_input2 = os.environ.get(
+        "SECONDARY_CSV",
+        "/Users/user/Desktop/USD/ADS 505/8358_1.csv"
+    )
+    default_out = os.environ.get(
+        "OUTDIR_BASE",
+        "/Users/user/Desktop/USD/ADS 505/outputs"
+    )
+
+    p = argparse.ArgumentParser(
+        description="Run EDA for pizza CSVs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+          Examples:
+            python eda_pizza_project.py --input "/path/to/pizza.csv"
+            python eda_pizza_project.py --input "/path/to/pizza.csv" --input2 "/path/to/second.csv"
+            python eda_pizza_project.py --outdir "./eda_outputs"       # creates run_YYYY-mm-dd_HHMMSS
+            python eda_pizza_project.py --outdir "./eda_outputs" --no-subdir
+        """)
+    )
+    p.add_argument("--input", type=str, default=default_input, help="Primary CSV")
+    p.add_argument("--input2", type=str, default=None if not os.path.exists(default_input2) else default_input2, help="Optional secondary CSV")
+    p.add_argument("--outdir", type=str, default=default_out, help="Base output directory")
+    p.add_argument("--no-subdir", action="store_true", help="Write directly to --outdir")
+    args = p.parse_args()
+
+    run_eda(args.input, args.outdir, args.input2, subdir=not args.no_subdir)
+
+if __name__ == "__main__":
+    main()
