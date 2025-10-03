@@ -1,5 +1,6 @@
 # ADS-505 Final Team Project: Applied Data Science for Business
-# 🍕 Project Name: SliceWise: Pricing, Menu, and Ratings Analytics for U.S. Pizza Restaurants
+# 🍕 Project Name: 
+## SliceWise: Pricing, Menu, and Ratings Analytics for U.S. Pizza Restaurants
 
 ## Data Source
 
