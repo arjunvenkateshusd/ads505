@@ -9,6 +9,10 @@ https://www.kaggle.com/datasets/datafiniti/pizza-restaurants-and-the-pizza-they-
 
 ## 💡Problem Statement 
 
+The Datafiniti dataset provides information on pizza restaurants in the United States. Information in this dataset includes restaurant names, locations, menu items, and prices. The goal of this analysis is to connect menu item type, pricing, and regional context to provide insights and recommendations on pricing strategies for pizza restaurant operators. Competitive pricing strategies can help pizza restaurants maximize revenue and attract more customers.
+
+Predicting pizza prices by location, restaurant type, and menu items so companies can implement competitive pricing strategies.
+
 ## 📁 Contents
 
 ## 🔍 Project Highlights
